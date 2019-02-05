@@ -1,5 +1,6 @@
 ---
 This is not an officially supported Google product.
+
 ---
 
 # Git Patrol Service
@@ -9,8 +10,6 @@ when changes are noticed. The Google Cloud Build service is capable of
 monitoring and triggering workflows from a limited selection of public hosting
 services (ex: GitHub). The Git Patrol service is written to fill in the gaps
 for users of other hosting platforms.
-
-[TOC]
 
 # Setup
 
