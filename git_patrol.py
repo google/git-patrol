@@ -43,6 +43,9 @@ GIT_HASH_REFNAME_REGEX = r'^([0-9a-f]{40})\t(refs/[^\s]{1,64})$'
 GCB_ASYNC_BUILD_ID_REGEX = (
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
+# Limit on the total number of ref filters.
+MAX_REF_FILTERS = 5
+
 # Route logs to StackDriver when running in the Cloud. The Google Cloud logging
 # library enables logs for INFO level by default.
 # Adapted from the "Setting up StackDriver Logging for Python" page at
@@ -82,6 +85,22 @@ class GitPatrolCommands:
     self.gcloud = make_subprocess_cmd('gcloud')
 
 
+async def git_check_ref_filter(commands, ref_filter):
+  """Use the git command to validate a ref filter.
+
+  Args:
+    commands: GitPatrolCommands object used to execute external commands.
+    ref_filter: The git ref filter to validate.
+  Returns:
+    True for a valid ref filter. False otherwise.
+  """
+  git_subproc = await commands.git(
+      'check-ref-format', '--allow-onelevel', '--refspec-pattern', ref_filter)
+  await git_subproc.communicate()
+  returncode = await git_subproc.wait()
+  return returncode == 0
+
+
 async def fetch_git_tags(commands, url):
   """Fetch tags from the provided git repository URL.
 
@@ -104,7 +123,7 @@ async def fetch_git_tags(commands, url):
   return tags
 
 
-async def fetch_git_refs(commands, url):
+async def fetch_git_refs(commands, url, ref_filters):
   """Fetch tags and HEADs from the provided git repository URL.
 
   Use 'git ls-remote --refs' to fetch the current list of references from the
@@ -123,12 +142,14 @@ async def fetch_git_refs(commands, url):
   Args:
     commands: GitPatrolCommands object used to execute external commands.
     url: URL of git repo to retrieve refs from.
+    ref_filters: A (possibly empty) list of ref filters to pass to the
+      'git ls-remote' command to filter the returned refs.
   Returns:
     Returns a dictionary of git references and commit hashes retrieved from the
     repository if successful. Returns None when the underlying git command
     fails.
   """
-  git_subproc = await commands.git('ls-remote', '--refs', url)
+  git_subproc = await commands.git('ls-remote', '--refs', url, *ref_filters)
   stdout, _ = await git_subproc.communicate()
   returncode = await git_subproc.wait()
   if returncode:
@@ -227,7 +248,8 @@ async def cloud_build_wait(commands, cloud_build_uuid):
   return stdout_bytes.decode('utf-8', 'ignore')
 
 
-async def run_workflow_triggers(commands, db, alias, url, current_tags):
+async def run_workflow_triggers(
+    commands, db, alias, url, ref_filters, current_tags):
   """Evaluates workflow trigger conditions.
 
   Poll the remote repository for a list of its git tags. The workflow trigger
@@ -239,6 +261,8 @@ async def run_workflow_triggers(commands, db, alias, url, current_tags):
     db: A GitPatrolDb object used for database operations.
     alias: Human friendly alias of the configuration for this repository.
     url: URL of the repository to patrol.
+    ref_filters: A (possibly empty) list of ref filters to pass to the
+      'git ls-remote' command to filter the returned refs.
     current_tags: List of git tags to expect in the cloned repository. Any tags
       that are now in the repository and not in this list will satisfy the
       workflow trigger.
@@ -262,10 +286,11 @@ async def run_workflow_triggers(commands, db, alias, url, current_tags):
 
   # Retreive current refs from the remote repo. This is non-fatal until we
   # migrate away from the pure tag-based design.
-  new_refs = await fetch_git_refs(commands, url)
+  new_refs = await fetch_git_refs(commands, url, ref_filters)
   if new_refs:
     # Add a new journal entry with these git refs.
-    git_refs_uuid = await db.record_git_poll(update_time, url, alias, new_refs)
+    git_refs_uuid = await db.record_git_poll(
+        update_time, url, alias, new_refs, ref_filters)
     if not git_refs_uuid:
       logger.warning('%s: failed to record git refs', alias)
 
@@ -310,7 +335,8 @@ async def target_loop(
     commands: GitPatrolCommands object used to execute external commands.
     loop: A reference to the asyncio event loop in use.
     db: A GitPatrolDb object used for database operations.
-    target: Git Patrol config target information.
+    config_path: Path to files referenced by the target configuration.
+    target_config: Git Patrol config target information.
     offset: Starting offset time in seconds.
     interval: Time in seconds to wait between poll attempts.
   Returns:
@@ -318,6 +344,19 @@ async def target_loop(
   """
   alias = target_config['alias']
   url = target_config['url']
+  ref_filters = []
+  if 'ref_filters' in target_config:
+    ref_filters = target_config['ref_filters']
+
+  # Validate target configuration.
+  if len(ref_filters) > MAX_REF_FILTERS:
+    logger.error('%s: too many ref filters provided', alias)
+    return
+  validate_tasks = [git_check_ref_filter(commands, f) for f in ref_filters]
+  ref_filters_ok = await asyncio.gather(*validate_tasks)
+  if not all(ref_filters_ok):
+    logger.error('%s: error in ref filter', alias)
+    return
 
   # Fetch latest git tags from the database.
   current_tags = await db.fetch_latest_tags_by_alias(alias)
@@ -339,7 +378,7 @@ async def target_loop(
 
     # Evaluate workflow triggers to see if the workflow needs to run again.
     workflow_trigger, current_tags = await run_workflow_triggers(
-        commands, db, alias, url, current_tags)
+        commands, db, alias, url, ref_filters, current_tags)
     if workflow_trigger:
       await run_workflow_body(
           commands, config_path, target_config, current_tags[-1])

@@ -169,11 +169,22 @@ class GitPatrolTest(unittest.TestCase):
     commands = git_patrol.GitPatrolCommands()
 
     upstream_url = 'file://' + self._upstream_dir
+    ref_filters = []
     refs = asyncio.get_event_loop().run_until_complete(
-        git_patrol.fetch_git_refs(commands, upstream_url))
+        git_patrol.fetch_git_refs(commands, upstream_url, ref_filters))
     self.assertListEqual(
         ['refs/heads/master', 'refs/tags/r0001', 'refs/tags/r0002'],
         sorted(list(refs.keys())))
+
+  def testFetchGitRefsFilteredSuccess(self):
+    commands = git_patrol.GitPatrolCommands()
+
+    upstream_url = 'file://' + self._upstream_dir
+    ref_filters = ['refs/tags/*']
+    refs = asyncio.get_event_loop().run_until_complete(
+        git_patrol.fetch_git_refs(commands, upstream_url, ref_filters))
+    self.assertListEqual(
+        ['refs/tags/r0001', 'refs/tags/r0002'], sorted(list(refs.keys())))
 
   def testWorkflowNotTriggered(self):
     commands = git_patrol.GitPatrolCommands()
@@ -189,14 +200,17 @@ class GitPatrolTest(unittest.TestCase):
     loop = asyncio.get_event_loop()
 
     upstream_url = 'file://' + self._upstream_dir
+    ref_filters = []
     workflow_trigger, current_tags = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
-            commands, mock_db, 'upstream', upstream_url, ['r0001', 'r0002']))
+            commands, mock_db, 'upstream', upstream_url, ref_filters,
+            ['r0001', 'r0002']))
 
     mock_record_git_tags.inner_mock.assert_called_with(
         unittest.mock.ANY, upstream_url, 'upstream', ['r0001', 'r0002'])
     mock_record_git_poll.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY)
+        unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY,
+        unittest.mock.ANY)
 
     # The git commit hashes are always unique across test runs, thus the
     # acrobatics here to extract the HEAD and tag names only.
@@ -222,14 +236,17 @@ class GitPatrolTest(unittest.TestCase):
     loop = asyncio.get_event_loop()
 
     upstream_url = 'file://' + self._upstream_dir
+    ref_filters = []
     workflow_trigger, current_tags = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
-            commands, mock_db, 'upstream', upstream_url, ['r0001']))
+            commands, mock_db, 'upstream', upstream_url, ref_filters,
+            ['r0001']))
 
     mock_record_git_tags.inner_mock.assert_called_with(
         unittest.mock.ANY, upstream_url, 'upstream', ['r0001', 'r0002'])
     mock_record_git_poll.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY)
+        unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY,
+        unittest.mock.ANY)
 
     # The git commit hashes are always unique across test runs, thus the
     # acrobatics here to extract the HEADs and tag names only.

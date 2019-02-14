@@ -77,7 +77,7 @@ class GitPatrolDb:
 
     return None
 
-  async def record_git_poll(self, utc_datetime, url, alias, refs):
+  async def record_git_poll(self, utc_datetime, url, alias, refs, ref_filters):
     """Update the git poll journal with results from the latest poll.
 
     Args:
@@ -86,6 +86,7 @@ class GitPatrolDb:
       alias: Human readable alias for the repository.
       refs: Dictionary of git reference names and commit hashes retrieved from
         the repository.
+      ref_filters: Git ref filters used to prune the returned references.
     Returns:
       The unique identifier assigned to this entry if successful. None
       otherwise.
@@ -95,10 +96,11 @@ class GitPatrolDb:
     async with self.db_pool.acquire() as conn:
       insert_status = await conn.execute(
           '''INSERT INTO git_poll_journal (
-            git_poll_uuid, update_time, url, alias, refs)
-          VALUES ($1, $2, $3, $4, $5);
+            git_poll_uuid, update_time, url, alias, refs, ref_filters)
+          VALUES ($1, $2, $3, $4, $5, $6);
           ''', poll_journal_uuid, utc_datetime, url, alias,
-          [[refname, commit] for (refname, commit) in refs.items()])
+          [[refname, commit] for (refname, commit) in refs.items()],
+          ref_filters)
       if insert_status == 'INSERT 0 1':
         return poll_journal_uuid
 

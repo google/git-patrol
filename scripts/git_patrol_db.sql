@@ -49,6 +49,9 @@ BEGIN;
     --   - GitHub pull requests (ex: refs/pull/NNN)
     --   - Anything else returned by "git ls-remote --refs"
     --
+    -- The above list will be pruned by any ref filter patterns passed to the
+    -- "git ls-remote" pattern.
+    --
     -- Elements are laid out as follows...
     --   - refs[i][0]: ref name
     --   - refs[i][1]: ref hash
@@ -56,5 +59,12 @@ BEGIN;
     -- Note: Fixed array dimensions are not enforced by Postgres. Provided
     -- purely for documentation-as-code purposes.
     refs text[][2],
+    -- Filter patterns (if any) used to filter the git refs returned for this
+    -- journal entry. There isn't a canonical name for this term in the git
+    -- literature (see docs for "git ls-remote" for description) so I'm going
+    -- with this name. If no filter patterns are applied then this array will
+    -- be empty. The "git check-ref-format --allow-onelevel --refspec-pattern"
+    -- command must be used to validate all entries.
+    ref_filters text[],
     PRIMARY KEY(git_poll_uuid));
 END;

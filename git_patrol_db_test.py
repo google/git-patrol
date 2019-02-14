@@ -106,15 +106,17 @@ class GitPatrolDbTest(unittest.TestCase):
     refs = {
         'refs/heads/master': 'abcde', 'refs/tags/r0001': 'abcde',
         'refs/tags/r0002': 'defgh' }
+    ref_filters = []
 
     db = git_patrol_db.GitPatrolDb(mock_pool)
     poll_journal_uuid = asyncio.get_event_loop().run_until_complete(
-        db.record_git_poll(None, None, None, refs))
+        db.record_git_poll(None, None, None, refs, ref_filters))
     self.assertTrue(poll_journal_uuid)
 
     mock_execute.inner_mock.assert_called_with(
         unittest.mock.ANY, poll_journal_uuid, unittest.mock.ANY,
-        unittest.mock.ANY, unittest.mock.ANY, unittest.mock.ANY)
+        unittest.mock.ANY, unittest.mock.ANY, unittest.mock.ANY,
+        unittest.mock.ANY)
 
 
 if __name__ == '__main__':
