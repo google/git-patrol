@@ -34,7 +34,7 @@ GIT_TAG_REGEX = r'refs/tags/(r[a-z0-9_\.]+)'
 # on StackOverflow (https://stackoverflow.com/questions/12093748). Since this
 # regex is parsing the output of the git command, we will assume it is well
 # formatted and just limit the length.
-GIT_HASH_REFNAME_REGEX = r'^([0-9a-f]{40})\t(refs/[^\s]{1,64})$'
+GIT_HASH_REFNAME_REGEX = r'^([0-9a-f]{40})\s+(refs/[^\s]{1,64})$'
 
 # Extract the Cloud Build UUID from the text sent to stdout when a build is
 # started with "gcloud builds submit ... --async".
@@ -101,28 +101,6 @@ async def git_check_ref_filter(commands, ref_filter):
   return returncode == 0
 
 
-async def fetch_git_tags(commands, url):
-  """Fetch tags from the provided git repository URL.
-
-  Args:
-    commands: GitPatrolCommands object used to execute external commands.
-    url: URL of git repo to retrieve tags from.
-  Returns:
-    A list of git tags in the repo. Returns an empty list when the undelying
-    git command fails.
-  """
-  git_subproc = await commands.git('ls-remote', '--refs', '--tags', url)
-  stdout, _ = await git_subproc.communicate()
-  returncode = await git_subproc.wait()
-  if returncode:
-    logger.warning('git ls-remote returned %d', returncode)
-    return []
-
-  raw_tags = stdout.decode('utf-8', 'ignore')
-  tags = re.findall(GIT_TAG_REGEX, raw_tags)
-  return tags
-
-
 async def fetch_git_refs(commands, url, ref_filters):
   """Fetch tags and HEADs from the provided git repository URL.
 
@@ -163,26 +141,39 @@ async def fetch_git_refs(commands, url, ref_filters):
   return {refname: commit for (commit, refname) in refs}
 
 
-async def cloud_build_start(commands, config_path, config, git_tag):
+async def cloud_build_start(commands, config_path, config, git_ref):
   """Submit a new workflow to Google Cloud Build.
 
   Args:
     commands: GitPatrolCommands object used to execute external commands.
     config_path: Path to the Cloud Build configuration sources.
     config: Configuration object to read Cloud Build config from.
-    git_tag: Name of the git tag to pass to the Cloud Build workflow.
+    git_ref: The git ref (ex: refs/heads/master, refs/tags/v0.0.1) that
+      triggered this workflow execution.
   Returns:
     The UUID of the newly created Cloud Build workflow if successful. Otherwise
     returns None.
   """
   arg_config = '--config={}'.format(os.path.join(config_path, config['config']))
 
-  substitutions = (
+  # Provide a few default substitutions that Google Cloud Build would fill in
+  # if it was launching a triggered workflow. See link for details...
+  # https://cloud.google.com/cloud-build/docs/configuring-builds/substitute-variable-values
+  arg_substitutions = '--substitutions='
+  if git_ref.startswith('refs/tags/'):
+    arg_substitutions += 'TAG_NAME={},'.format(
+        git_ref.replace('refs/tags/', ''))
+  elif git_ref.startswith('refs/heads/'):
+    arg_substitutions += 'BRANCH_NAME={},'.format(
+        git_ref.replace('refs/heads/', ''))
+
+  # Generate a substitution string from the target config.
+  # TODO(brian): Handle no substitutions.
+  subs_config = (
       ','.join(
           '{!s}={!s}'.format(
               k, v) for (k, v) in config['substitutions'].items()))
-  arg_substitutions = '--substitutions=TAG_NAME={},{}'.format(
-      git_tag, substitutions)
+  arg_substitutions += subs_config
 
   arg_sources = os.path.join(config_path, config['sources'])
 
@@ -248,13 +239,38 @@ async def cloud_build_wait(commands, cloud_build_uuid):
   return stdout_bytes.decode('utf-8', 'ignore')
 
 
+def git_refs_find_deltas(previous_refs, current_refs):
+  """Finds new or updated git refs.
+
+  Identifies the new git refs and the git refs whose commit hashes are
+  different in current refs. Git refs present in previous_refs but missing
+  from current_refs are ignored.
+
+  Args:
+    previous_refs: Dictionary of git refs to compare against.
+    current_refs: Dictionary of git refs possibly containing new entries or
+      updates.
+
+  Returns:
+    A dictionary of the new and updated git refs found in current_refs,
+    otherwise an empty dictionary.
+  """
+  new_refs = {}
+  for k, v in current_refs.items():
+    if k not in previous_refs:
+      new_refs[k] = v
+    elif previous_refs[k] != v:
+      new_refs[k] = v
+  return new_refs
+
+
 async def run_workflow_triggers(
-    commands, db, alias, url, ref_filters, current_tags):
+    commands, db, alias, url, ref_filters, previous_refs):
   """Evaluates workflow trigger conditions.
 
-  Poll the remote repository for a list of its git tags. The workflow trigger
-  will be satisfied if new tags were added since the last time the repository
-  was polled.
+  Poll the remote repository for a list of its git refs. The workflow trigger
+  will be satisfied if any git refs were added or changed since the last time
+  the repository was polled.
 
   Args:
     commands: GitPatrolCommands object used to execute external commands.
@@ -263,60 +279,52 @@ async def run_workflow_triggers(
     url: URL of the repository to patrol.
     ref_filters: A (possibly empty) list of ref filters to pass to the
       'git ls-remote' command to filter the returned refs.
-    current_tags: List of git tags to expect in the cloned repository. Any tags
-      that are now in the repository and not in this list will satisfy the
-      workflow trigger.
+    previous_refs: List of git refs to expect in the cloned repository. Any refs
+      that are now in the repository and not in this list, or any altered refs
+      will satisfy the workflow trigger.
   Returns:
-    Returns a (boolean, string[]) tuple. The first item is True when the
-    workflow trigger has been satisfied and False otherwise. The second item
-    contains a list of the current git tags in the remote repository.
+    Returns a (dict, dict) tuple. The first item contains a dictionary of the
+    current git tags in the remote repository. The second item contains a
+    dictionary of git refs that should trigger a workflow execution.
   """
-  # Retrieve current tags from the remote repo.
-  new_tags = await fetch_git_tags(commands, url)
-  if not new_tags:
-    return False, current_tags
-  logger.info('%s: fetched tags: %s', alias, ' '.join(new_tags))
+  # Retrieve current refs from the remote repo.
+  current_refs = await fetch_git_refs(commands, url, ref_filters)
+  if not current_refs:
+    return previous_refs, {}
 
-  # Add a new journal entry with these git tags.
+  # Add a new journal entry with these git refs.
   update_time = datetime.datetime.utcnow()
-  git_tags_uuid = await db.record_git_tags(update_time, url, alias, new_tags)
-  if not git_tags_uuid:
-    logger.warning('%s: failed to record git tags', alias)
-    return False, current_tags
+  git_refs_uuid = await db.record_git_poll(
+      update_time, url, alias, current_refs, ref_filters)
+  if not git_refs_uuid:
+    logger.warning('%s: failed to record git refs', alias)
+    return previous_refs, {}
 
-  # Retreive current refs from the remote repo. This is non-fatal until we
-  # migrate away from the pure tag-based design.
-  new_refs = await fetch_git_refs(commands, url, ref_filters)
-  if new_refs:
-    # Add a new journal entry with these git refs.
-    git_refs_uuid = await db.record_git_poll(
-        update_time, url, alias, new_refs, ref_filters)
-    if not git_refs_uuid:
-      logger.warning('%s: failed to record git refs', alias)
+  # See if the repository was updated since the last check.
+  new_refs = git_refs_find_deltas(previous_refs, current_refs)
+  if not new_refs:
+    logger.info('%s: no new refs', alias)
+    return previous_refs, {}
 
-  # See if new git tags were added since the last check.
-  tags_delta = set(new_tags) - set(current_tags)
-  if not tags_delta:
-    logger.info('%s: no new tags', alias)
-    return False, current_tags
-
-  logger.info('%s: new tags: %s', alias, ' '.join(tags_delta))
-  return True, new_tags
+  logger.info('%s: new refs: %s', alias, new_refs)
+  return current_refs, new_refs
 
 
-async def run_workflow_body(commands, config_path, config, git_tag):
+async def run_workflow_body(
+    commands, config_path, config, git_ref):
   """Runs the actual workflow logic.
 
   Args:
     commands: GitPatrolCommands object used to execute external commands.
     config_path: Path to the Cloud Build configuration sources.
     config: Target configuration object.
-    git_tag: Expected git tag at HEAD in the cloned repository.
+    git_ref: The git ref (ex: refs/heads/master, refs/tags/v0.0.1) that
+      triggered this workflow execution.
   Returns:
     True when the workflow completes successfully. False otherwise.
   """
   for workflow in config['workflows']:
-    build_id = await cloud_build_start(commands, config_path, workflow, git_tag)
+    build_id = await cloud_build_start(commands, config_path, workflow, git_ref)
     if not build_id:
       return False
 
@@ -359,8 +367,8 @@ async def target_loop(
     return
 
   # Fetch latest git tags from the database.
-  current_tags = await db.fetch_latest_tags_by_alias(alias)
-  logger.info('%s: current tags %s', alias, ' '.join(current_tags))
+  current_refs = await db.fetch_latest_refs_by_alias(alias)
+  logger.info('%s: current refs %s', alias, current_refs)
 
   # Stagger the wakeup time of the target loops to avoid hammering the remote
   # server with requests all at once.
@@ -377,8 +385,10 @@ async def target_loop(
     await asyncio.sleep(sleep_time)
 
     # Evaluate workflow triggers to see if the workflow needs to run again.
-    workflow_trigger, current_tags = await run_workflow_triggers(
-        commands, db, alias, url, ref_filters, current_tags)
-    if workflow_trigger:
-      await run_workflow_body(
-          commands, config_path, target_config, current_tags[-1])
+    current_refs, new_refs = await run_workflow_triggers(
+        commands, db, alias, url, ref_filters, current_refs)
+
+    workflow_tasks = [
+        run_workflow_body(commands, config_path, target_config, ref)
+        for ref in new_refs.keys() ]
+    await asyncio.gather(*workflow_tasks)

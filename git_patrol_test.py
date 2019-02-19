@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -100,8 +101,7 @@ def AsyncioMock(*args, **kwargs):
 
 class MockGitPatrolDb():
 
-  def __init__(self, record_git_tags=None, record_git_poll=None):
-    self.record_git_tags = record_git_tags
+  def __init__(self, record_git_poll=None):
     self.record_git_poll = record_git_poll
 
 
@@ -145,25 +145,28 @@ class GitPatrolTest(unittest.TestCase):
     returncode = await proc.wait()
     self.assertEqual(returncode, 0)
 
+    proc = await asyncio.create_subprocess_exec(
+        'git', 'show-ref', stdout=asyncio.subprocess.PIPE, cwd=git_dir)
+    stdout, _ = await proc.communicate()
+    returncode = await proc.wait()
+    self.assertEqual(returncode, 0)
+
+    raw_refs = stdout.decode('utf-8', 'ignore')
+    refs = re.findall(git_patrol.GIT_HASH_REFNAME_REGEX, raw_refs, re.MULTILINE)
+    self.assertEqual(len(refs), 3)
+    return {refname: commit for (commit, refname) in refs}
+
   def setUp(self):
     logging.disable(logging.CRITICAL)
 
     self._temp_dir = tempfile.mkdtemp()
     self._upstream_dir = os.path.join(self._temp_dir, 'upstream')
     os.makedirs(self._upstream_dir)
-    asyncio.get_event_loop().run_until_complete(
+    self._refs = asyncio.get_event_loop().run_until_complete(
         self._init_git_repo(self._upstream_dir))
 
   def tearDown(self):
     shutil.rmtree(self._temp_dir, ignore_errors=True)
-
-  def testFetchGitTagsSuccess(self):
-    commands = git_patrol.GitPatrolCommands()
-
-    upstream_url = 'file://' + self._upstream_dir
-    tags = asyncio.get_event_loop().run_until_complete(
-        git_patrol.fetch_git_tags(commands, upstream_url))
-    self.assertEqual(tags, ['r0001', 'r0002'])
 
   def testFetchGitRefsSuccess(self):
     commands = git_patrol.GitPatrolCommands()
@@ -172,9 +175,7 @@ class GitPatrolTest(unittest.TestCase):
     ref_filters = []
     refs = asyncio.get_event_loop().run_until_complete(
         git_patrol.fetch_git_refs(commands, upstream_url, ref_filters))
-    self.assertListEqual(
-        ['refs/heads/master', 'refs/tags/r0001', 'refs/tags/r0002'],
-        sorted(list(refs.keys())))
+    self.assertDictEqual(refs, self._refs)
 
   def testFetchGitRefsFilteredSuccess(self):
     commands = git_patrol.GitPatrolCommands()
@@ -183,31 +184,26 @@ class GitPatrolTest(unittest.TestCase):
     ref_filters = ['refs/tags/*']
     refs = asyncio.get_event_loop().run_until_complete(
         git_patrol.fetch_git_refs(commands, upstream_url, ref_filters))
-    self.assertListEqual(
-        ['refs/tags/r0001', 'refs/tags/r0002'], sorted(list(refs.keys())))
+    self.assertDictEqual(
+        refs,
+        { k: v for k, v in self._refs.items() if k.startswith('refs/tags/') })
 
   def testWorkflowNotTriggered(self):
     commands = git_patrol.GitPatrolCommands()
 
-    tag_history_uuid = uuid.uuid4()
     git_poll_uuid = uuid.uuid4()
-    mock_record_git_tags = AsyncioMock(return_value=tag_history_uuid)
     mock_record_git_poll = AsyncioMock(return_value=git_poll_uuid)
-    mock_db = MockGitPatrolDb(
-        record_git_tags=mock_record_git_tags,
-        record_git_poll=mock_record_git_poll)
+    mock_db = MockGitPatrolDb(record_git_poll=mock_record_git_poll)
 
     loop = asyncio.get_event_loop()
 
     upstream_url = 'file://' + self._upstream_dir
     ref_filters = []
-    workflow_trigger, current_tags = loop.run_until_complete(
+    current_refs, new_refs = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
             commands, mock_db, 'upstream', upstream_url, ref_filters,
-            ['r0001', 'r0002']))
+            self._refs))
 
-    mock_record_git_tags.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', ['r0001', 'r0002'])
     mock_record_git_poll.inner_mock.assert_called_with(
         unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY,
         unittest.mock.ANY)
@@ -219,31 +215,26 @@ class GitPatrolTest(unittest.TestCase):
         ['refs/heads/master', 'refs/tags/r0001', 'refs/tags/r0002'],
         sorted(list(record_git_poll_args[3].keys())))
 
-    self.assertEqual(workflow_trigger, False)
-    self.assertEqual(current_tags, ['r0001', 'r0002'])
+    self.assertEqual(current_refs, self._refs)
+    self.assertFalse(new_refs)
 
   def testWorkflowIsTriggered(self):
     commands = git_patrol.GitPatrolCommands()
 
     tag_history_uuid = uuid.uuid4()
     git_poll_uuid = uuid.uuid4()
-    mock_record_git_tags = AsyncioMock(return_value=tag_history_uuid)
     mock_record_git_poll = AsyncioMock(return_value=git_poll_uuid)
-    mock_db = MockGitPatrolDb(
-        record_git_tags=mock_record_git_tags,
-        record_git_poll=mock_record_git_poll)
+    mock_db = MockGitPatrolDb(record_git_poll=mock_record_git_poll)
 
     loop = asyncio.get_event_loop()
 
     upstream_url = 'file://' + self._upstream_dir
     ref_filters = []
-    workflow_trigger, current_tags = loop.run_until_complete(
+    current_refs, new_refs = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
             commands, mock_db, 'upstream', upstream_url, ref_filters,
-            ['r0001']))
+            { 'refs/heads/master': 'none' }))
 
-    mock_record_git_tags.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', ['r0001', 'r0002'])
     mock_record_git_poll.inner_mock.assert_called_with(
         unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY,
         unittest.mock.ANY)
@@ -255,8 +246,8 @@ class GitPatrolTest(unittest.TestCase):
         ['refs/heads/master', 'refs/tags/r0001', 'refs/tags/r0002'],
         sorted(list(record_git_poll_args[3].keys())))
 
-    self.assertEqual(workflow_trigger, True)
-    self.assertEqual(current_tags, ['r0001', 'r0002'])
+    self.assertDictEqual(current_refs, self._refs)
+    self.assertDictEqual(new_refs, self._refs)
 
   def testRunWorkflowSuccess(self):
     cloud_build_uuid = '7d1bb5a7-545f-4c30-b640-f5461036e2e7'
@@ -305,17 +296,18 @@ class GitPatrolTest(unittest.TestCase):
         ','.join('{!s}={!s}'.format(k, v) for (k, v) in substitutions.items()))
 
     config_path = '/some/path'
-    git_tag = 'r0002'
+    git_ref = 'refs/tags/r0002'
 
     workflow_success = asyncio.get_event_loop().run_until_complete(
         git_patrol.run_workflow_body(
-            commands, config_path, target_config, git_tag))
+            commands, config_path, target_config, git_ref))
     self.assertTrue(workflow_success)
 
     commands.gcloud.assert_any_call(
         'builds', 'submit', '--async',
         '--config={}'.format(os.path.join(config_path, workflow['config'])),
-        '--substitutions=TAG_NAME={},{}'.format(git_tag, substitution_list),
+        '--substitutions=TAG_NAME={},{}'.format(
+            git_ref.replace('refs/tags/', ''), substitution_list),
         os.path.join(config_path, workflow['sources']))
 
     commands.gcloud.assert_any_call(

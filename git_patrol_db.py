@@ -32,50 +32,25 @@ class GitPatrolDb:
   def __init__(self, asyncpg_pool):
     self.db_pool = asyncpg_pool
 
-  async def fetch_latest_tags_by_alias(self, alias):
-    """Retrieve the most recent git tags for a given alias.
+  async def fetch_latest_refs_by_alias(self, alias):
+    """Retrieve the most recent git refs for a given alias.
 
     Args:
       alias: The git alias to use when looking up git tags.
     Returns:
-      A list of git tags as strings when successful. An empty list otherwise.
+      A dictionary of git refs and commit hashes. An empty dictionary otherwise.
     """
     async with self.db_pool.acquire() as conn:
-      row = await conn.fetchrow('''
-          SELECT tags
-          FROM tag_history
+      row = await conn.fetchrow(
+          '''SELECT refs
+          FROM git_poll_journal
           WHERE alias = $1
           ORDER BY update_time DESC LIMIT 1;
           ''', alias)
       if row:
-        return row['tags']
+        return { ref[0]: ref[1] for ref in row['refs'] }
 
-    return []
-
-  async def record_git_tags(self, utc_datetime, url, alias, git_tags):
-    """Update the git tag history with results from the latest poll.
-
-    Args:
-      utc_datetime: Timestamp of the poll operation in UTC time zone.
-      url: Git URL of the polled repository.
-      alias: Human readable alias for the repository.
-      git_tags: List of git tag strings retrieved from the repository.
-    Returns:
-      The unique identifier assigned to this entry if successful. None
-      otherwise.
-    """
-    tag_history_uuid = uuid.uuid4()
-
-    async with self.db_pool.acquire() as conn:
-      insert_status = await conn.execute(
-          '''INSERT INTO tag_history (
-            tag_history_uuid, update_time, url, alias, tags)
-          VALUES ($1, $2, $3, $4, $5);
-          ''', tag_history_uuid, utc_datetime, url, alias, git_tags)
-      if insert_status == 'INSERT 0 1':
-        return tag_history_uuid
-
-    return None
+    return {}
 
   async def record_git_poll(self, utc_datetime, url, alias, refs, ref_filters):
     """Update the git poll journal with results from the latest poll.

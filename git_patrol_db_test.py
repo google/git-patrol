@@ -73,30 +73,20 @@ class MockAsyncpgPool:
 class GitPatrolDbTest(unittest.TestCase):
 
   def testFetchGitTagsSuccess(self):
-    mock_fetchrow = AsyncioMock(return_value={'tags': ['r0000', 'r0001']})
+    mock_fetchrow = AsyncioMock(
+        return_value={
+            'refs': [['refs/tags/r0000', 'abcd'], ['refs/tags/r0001', 'fghi']]
+        })
     mock_connection = MockAsyncpgConnection(fetchrow=mock_fetchrow)
     mock_pool = MockAsyncpgPool(connection=mock_connection)
 
     db = git_patrol_db.GitPatrolDb(mock_pool)
-    tags = asyncio.get_event_loop().run_until_complete(
-        db.fetch_latest_tags_by_alias('sdm845'))
-    self.assertEqual(tags, ['r0000', 'r0001'])
+    refs = asyncio.get_event_loop().run_until_complete(
+        db.fetch_latest_refs_by_alias('sdm845'))
+    self.assertEqual(
+        refs, {'refs/tags/r0000': 'abcd', 'refs/tags/r0001': 'fghi'})
 
     mock_fetchrow.inner_mock.assert_called_with(unittest.mock.ANY, 'sdm845')
-
-  def testRecordGitTagsSuccess(self):
-    mock_execute = AsyncioMock(return_value='INSERT 0 1')
-    mock_connection = MockAsyncpgConnection(execute=mock_execute)
-    mock_pool = MockAsyncpgPool(connection=mock_connection)
-
-    db = git_patrol_db.GitPatrolDb(mock_pool)
-    tag_history_uuid = asyncio.get_event_loop().run_until_complete(
-        db.record_git_tags(None, None, None, None))
-    self.assertTrue(tag_history_uuid)
-
-    mock_execute.inner_mock.assert_called_with(
-        unittest.mock.ANY, tag_history_uuid, unittest.mock.ANY,
-        unittest.mock.ANY, unittest.mock.ANY, unittest.mock.ANY)
 
   def testRecordGitPollSuccess(self):
     mock_execute = AsyncioMock(return_value='INSERT 0 1')
