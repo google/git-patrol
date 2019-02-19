@@ -287,7 +287,7 @@ async def run_workflow_triggers(
     current git tags in the remote repository. The second item contains a
     dictionary of git refs that should trigger a workflow execution.
   """
-  # Retreive current refs from the remote repo.
+  # Retrieve current refs from the remote repo.
   current_refs = await fetch_git_refs(commands, url, ref_filters)
   if not current_refs:
     return previous_refs, {}
