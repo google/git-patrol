@@ -78,16 +78,10 @@ RUN mkdir /cloud-build-config.d
 # There should be no secret information contained in these arguments per se,
 # rather they are passed as arguments to gcloud commands that fetch and decrypt
 # the actual secrets.
-ARG SECRET_URL
-ARG KMS_PROJECT
-ARG KMS_KEYRING
-ARG KMS_KEY
-
-ENV SECRET_URL=${SECRET_URL}
-ENV KMS_PROJECT=${KMS_PROJECT}
-ENV KMS_KEYRING=${KMS_KEYRING}
-ENV KMS_KEY=${KMS_KEY}
-ENV WORK_DIR="/tmp"
+ENV SECRET_URL=""
+ENV KMS_PROJECT=""
+ENV KMS_KEYRING=""
+ENV KMS_KEY=""
 
 # Parameters for connecting to the persistent state database. These should be
 # provided as environment variables by the Kubernetes deployment YAML config
@@ -100,4 +94,4 @@ ENV DB_NAME=""
 ENV DB_PASSWORD=""
 
 # Run the Git Patrol service by default.
-ENTRYPOINT bash /usr/sbin/run.sh $SECRET_URL $KMS_PROJECT $KMS_KEYRING $KMS_KEY
+ENTRYPOINT bash /usr/sbin/run.sh

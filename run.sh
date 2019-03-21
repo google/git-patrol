@@ -14,21 +14,10 @@
 # limitations under the License.
 #
 # Usage:
-#  $ run.sh <secret_url> <kms_project> <kms_keyring> <kms_key>
+#  $ run.sh
 
 # Add gsutil command to PATH.
 source /usr/google-cloud-sdk/path.bash.inc
-
-if [[ $# != 4 ]]; then
-  echo "Usage"
-  echo "  $ run.sh <secret_url> <kms_project> <kms_keyring> <kms_key>"
-  exit 1
-fi
-
-readonly SECRET_URL=$1
-readonly KMS_PROJECT=$2
-readonly KMS_KEYRING=$3
-readonly KMS_KEY=$4
 
 # Verify DB entpoint and credentials are provided to the container.
 if [[ -z "$DB_HOST" || -z "$DB_USER" || -z "$DB_PASSWORD" || -z "$DB_NAME" ]]; then
@@ -36,21 +25,29 @@ if [[ -z "$DB_HOST" || -z "$DB_USER" || -z "$DB_PASSWORD" || -z "$DB_NAME" ]]; t
   exit 1
 fi
 
-# Retrieve and install secrets.
-echo "Copy encrypted credentials from Cloud Storage"
-gsutil cp "$SECRET_URL" "$HOME/secrets.tar.gz.enc" || { exit 1; }
+# Optionally fetch, decrypt and install secrets to the $HOME folder.
+if [[ ! -z "$SECRET_URL" ]]; then
+  if [[ -z "$KMS_PROJECT" || -z "$KMS_KEYRING" || -z "$KMS_KEY" ]]; then
+    echo "Missing Cloud KMS environment variables"
+    exit 1
+  fi
 
-echo "Decrypt credentials to $HOME"
-gcloud kms decrypt \
-    --location=global \
-    --project="$KMS_PROJECT" \
-    --keyring="$KMS_KEYRING" \
-    --key="$KMS_KEY" \
-    --ciphertext-file="$HOME/secrets.tar.gz.enc" \
-    --plaintext-file="$HOME/secrets.tar.gz" || { exit 1; }
+  # Retrieve and install secrets.
+  echo "Copy encrypted credentials from Cloud Storage"
+  gsutil cp "$SECRET_URL" "$HOME/secrets.tar.gz.enc" || { exit 1; }
 
-echo "Extract credentials to $HOME"
-tar -C "$HOME" -xzf "$HOME/secrets.tar.gz" || { exit 1; }
+  echo "Decrypt credentials to $HOME"
+  gcloud kms decrypt \
+      --location=global \
+      --project="$KMS_PROJECT" \
+      --keyring="$KMS_KEYRING" \
+      --key="$KMS_KEY" \
+      --ciphertext-file="$HOME/secrets.tar.gz.enc" \
+      --plaintext-file="$HOME/secrets.tar.gz" || { exit 1; }
+
+  echo "Extract credentials to $HOME"
+  tar -C "$HOME" -xzf "$HOME/secrets.tar.gz" || { exit 1; }
+fi
 
 # Run long-lived service.
 #   - poll_interval: 7200 seconds chosen arbitrarily as a compomise betwen
