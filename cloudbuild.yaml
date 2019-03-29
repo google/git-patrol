@@ -1,0 +1,44 @@
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+steps:
+
+# Container to publish git repositories over HTTP.
+# TODO(brian): Pull from upstream once my PR fix is merged.
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+      'build', '--tag', 'git-http-backend',
+      'https://github.com/v1bri/git-http-backend.git#git-daemon-package' ]
+
+# Docker compose container.
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+      'build', '--tag', 'docker-compose', '--build-arg', 'version=1.23.2',
+      'https://github.com/GoogleCloudPlatform/cloud-builders-community.git#:docker-compose' ]
+
+# Git Patrol container.
+- name: 'gcr.io/cloud-builders/docker'
+  args: [ 'build', '--tag', 'git-patrol', '--network=cloudbuild', '.' ]
+
+# Unit tests.
+- name: 'git-patrol'
+  entrypoint: '/usr/bin/python3'
+  args: [ '-m', 'unittest', 'git_patrol_test' ]
+- name: 'git-patrol'
+  entrypoint: '/usr/bin/python3'
+  args: [ '-m', 'unittest', 'git_patrol_db_test' ]
+
+# Integration test.
+- name: 'docker-compose'
+  args: [ 'up', '--abort-on-container-exit', '--exit-code-from', 'test-runner' ]

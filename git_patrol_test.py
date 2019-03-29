@@ -279,7 +279,7 @@ class GitPatrolTest(unittest.TestCase):
     commands.gcloud.side_effect = _MakeMockCommand(
         stdout_fn=gcloud_builds_stdout)
 
-    target_config = yaml.load(
+    target_config = yaml.safe_load(
         """
         alias: upstream
         workflows:

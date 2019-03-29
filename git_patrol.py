@@ -101,6 +101,22 @@ async def git_check_ref_filter(commands, ref_filter):
   return returncode == 0
 
 
+def log_command_error(command, returncode, stdout_bytes, stderr_bytes):
+  """Helper function to log command errors.
+
+  Args:
+    command: The command that was run.
+    returncode: Command's numeric return code.
+    stdout_bytes: Command's raw standard output.
+    stderr_bytes: Command's raw standard error output.
+  """
+  logger.warning('%s returned %d', command, returncode)
+  logger.warning(
+      '%s stdout:\n%s', command, stdout_bytes.decode('utf-8', 'ignore'))
+  logger.warning(
+      '%s stderr:\n%s', command, stderr_bytes.decode('utf-8', 'ignore'))
+
+
 async def fetch_git_refs(commands, url, ref_filters):
   """Fetch tags and HEADs from the provided git repository URL.
 
@@ -128,15 +144,15 @@ async def fetch_git_refs(commands, url, ref_filters):
     fails.
   """
   git_subproc = await commands.git('ls-remote', '--refs', url, *ref_filters)
-  stdout, _ = await git_subproc.communicate()
+  stdout_bytes, stderr_bytes = await git_subproc.communicate()
   returncode = await git_subproc.wait()
   if returncode:
-    logger.warning('git ls-remote returned %d', returncode)
+    log_command_error('git ls-remote', returncode, stdout_bytes, stderr_bytes)
     return None
 
   # Note that re.findall() returns group matches as tuples, so a conversion to
   # lists is necessary.
-  raw_refs = stdout.decode('utf-8', 'ignore')
+  raw_refs = stdout_bytes.decode('utf-8', 'ignore')
   refs = re.findall(GIT_HASH_REFNAME_REGEX, raw_refs, re.MULTILINE)
   return {refname: commit for (commit, refname) in refs}
 
@@ -159,30 +175,36 @@ async def cloud_build_start(commands, config_path, config, git_ref):
   # Provide a few default substitutions that Google Cloud Build would fill in
   # if it was launching a triggered workflow. See link for details...
   # https://cloud.google.com/cloud-build/docs/configuring-builds/substitute-variable-values
-  arg_substitutions = '--substitutions='
+  substitutions_list = []
   if git_ref.startswith('refs/tags/'):
-    arg_substitutions += 'TAG_NAME={},'.format(
-        git_ref.replace('refs/tags/', ''))
+    substitutions_list.append(
+        'TAG_NAME={}'.format(git_ref.replace('refs/tags/', '')))
   elif git_ref.startswith('refs/heads/'):
-    arg_substitutions += 'BRANCH_NAME={},'.format(
-        git_ref.replace('refs/heads/', ''))
+    substitutions_list.append(
+        'BRANCH_NAME={}'.format(git_ref.replace('refs/heads/', '')))
 
-  # Generate a substitution string from the target config.
-  # TODO(brian): Handle no substitutions.
-  subs_config = (
-      ','.join(
-          '{!s}={!s}'.format(
-              k, v) for (k, v) in config['substitutions'].items()))
-  arg_substitutions += subs_config
+  # Generate substitution strings from the target config.
+  if 'substitutions' in config:
+    substitutions_list += [
+        '{!s}={!s}'.format(k, v) for (k, v) in config['substitutions'].items()]
 
-  arg_sources = os.path.join(config_path, config['sources'])
+  # Populate the substitutions argument if needed.
+  arg_substitutions = ''
+  if substitutions_list:
+    arg_substitutions = '--substitutions=' + ','.join(substitutions_list)
+
+  # Support an optional source archive passed to the workflow.
+  arg_sources = '--no-source'
+  if 'sources' in config:
+    arg_sources = os.path.join(config_path, config['sources'])
 
   gcloud_subproc = await commands.gcloud(
       'builds', 'submit', '--async', arg_config, arg_substitutions, arg_sources)
-  stdout_bytes, _ = await gcloud_subproc.communicate()
+  stdout_bytes, stderr_bytes = await gcloud_subproc.communicate()
   returncode = await gcloud_subproc.wait()
   if returncode:
-    logger.warning('gcloud builds submit returned %d', returncode)
+    log_command_error(
+        'gcloud builds submit', returncode, stdout_bytes, stderr_bytes)
     return None
 
   stdout_lines = stdout_bytes.decode('utf-8', 'ignore').splitlines()

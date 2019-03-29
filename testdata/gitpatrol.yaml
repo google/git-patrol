@@ -1,0 +1,6 @@
+targets:
+- alias: 'test'
+  url: 'http://git-http/git/test.git'
+  workflows:
+  - alias: 'true'
+    config: 'cloudbuild-true.yaml'

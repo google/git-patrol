@@ -1,0 +1,3 @@
+steps:
+- name: 'alpine:latest'
+  args: [ 'true', '$TAG_NAME', '$BRANCH_NAME' ]

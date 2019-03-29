@@ -14,11 +14,7 @@
 #
 # Defines a container for the Git Patrol service.
 # Usage:
-#   $ docker build . -t git-patrol \
-#       --build-arg SECRET_URL=<secret_url> \
-#       --build-arg KMS_PROJECT=<kms_project> \
-#       --build-arg KMS_KEYRING=<kms_keyring> \
-#       --build-arg KMS_KEY=<kms_key>
+#   $ docker build . -t git-patrol
 #   $ docker run git-patrol
 
 FROM ubuntu:18.04
@@ -67,10 +63,6 @@ COPY git_patrol_db.py /usr/sbin/git_patrol_db.py
 COPY git_patrol.py /usr/sbin/git_patrol.py
 COPY run.sh /usr/sbin/run.sh
 
-# Git Patrol test scripts.
-COPY git_patrol_db_test.py /usr/sbin/git_patrol_db_test.py
-COPY git_patrol_test.py /usr/sbin/git_patrol_test.py
-
 # Create the folder used to mount Cloud Build configuration.
 RUN mkdir /cloud-build-config.d
 
@@ -94,4 +86,4 @@ ENV DB_NAME=""
 ENV DB_PASSWORD=""
 
 # Run the Git Patrol service by default.
-ENTRYPOINT bash /usr/sbin/run.sh
+ENTRYPOINT ["bash", "/usr/sbin/run.sh"]

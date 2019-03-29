@@ -14,10 +14,13 @@
 # limitations under the License.
 #
 # Usage:
-#  $ run.sh
+#  $ run.sh [<git_patrol_args>]
 
 # Add gsutil command to PATH.
 source /usr/google-cloud-sdk/path.bash.inc
+
+# Hang onto arguments that should be passed to Git Patrol.
+readonly GIT_PATROL_ARGS="$@"
 
 # Verify DB entpoint and credentials are provided to the container.
 if [[ -z "$DB_HOST" || -z "$DB_USER" || -z "$DB_PASSWORD" || -z "$DB_NAME" ]]; then
@@ -54,9 +57,9 @@ fi
 #     responsiveness and low overhead to the remote server.
 echo "Start Git Patrol"
 exec python3 /usr/sbin/git_patrol_gce.py \
-    --poll_interval=7200 \
     --config_path=/cloud-build-config.d \
     --db_host="$DB_HOST" \
     --db_name="$DB_NAME" \
     --db_user="$DB_USER" \
-    --db_password="$DB_PASSWORD"
+    --db_password="$DB_PASSWORD" \
+    $GIT_PATROL_ARGS

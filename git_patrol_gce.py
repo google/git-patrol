@@ -24,11 +24,16 @@ import argparse
 import asyncio
 import logging
 import os
+import time
 import yaml
 
 import asyncpg
 import git_patrol
 import git_patrol_db
+
+
+DB_CONNECT_ATTEMPTS = 3
+DB_CONNECT_WAIT_SECS = 10
 
 
 # Route logs to StackDriver. The Google Cloud logging library enables logs
@@ -90,15 +95,37 @@ def main():
   # handle parse errors etc.
   with open(os.path.join(args.config_path, args.config), 'r') as f:
     raw_config = f.read()
-  git_patrol_config = yaml.load(raw_config)
+  git_patrol_config = yaml.safe_load(raw_config)
   git_patrol_targets = git_patrol_config['targets']
 
   # Connect to the persistent state database.
   loop = asyncio.get_event_loop()
-  db_pool = loop.run_until_complete(
-      asyncpg.create_pool(
-          host=args.db_host, port=args.db_port, user=args.db_user,
-          password=args.db_password, database=args.db_name))
+  db_pool = None
+  for i in range(DB_CONNECT_ATTEMPTS):
+    try:
+      db_pool = loop.run_until_complete(
+          asyncpg.create_pool(
+              host=args.db_host, port=args.db_port, user=args.db_user,
+              password=args.db_password, database=args.db_name))
+      if db_pool:
+        break
+    except asyncpg.exceptions.InvalidPasswordError as e:
+      logging.error('Bad database login: %s', e)
+      break
+    except asyncpg.exceptions.InvalidCatalogNameError as e:
+      logging.error('Unknown database: %s', e)
+      break
+    except OSError as e:
+      logging.warning('OSError while connecting: %s', e)
+
+    # Retry non-fatal errors after a brief timeout.
+    if i < (DB_CONNECT_ATTEMPTS - 1):
+      logging.warning(
+          'Connect error. Retry in %d seconds...', DB_CONNECT_WAIT_SECS)
+      time.sleep(DB_CONNECT_WAIT_SECS)
+
+  if not db_pool:
+    return
   db = git_patrol_db.GitPatrolDb(db_pool)
 
   # Create a polling loop coroutine for each target repository. Provide an

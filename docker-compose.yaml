@@ -1,0 +1,78 @@
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: '3.2'
+services:
+  # PostgreSQL database. Using a default plaintext password here because the
+  # database is not accessible from the outside world (no "ports:" field).
+  postgres:
+    image: 'launcher.gcr.io/google/postgresql9'
+    volumes:
+    - './scripts:/docker-entrypoint-initdb.d'
+    environment:
+    - 'POSTGRES_PASSWORD=postgres'
+
+  # HTTP server and backend for git repositories.
+  git-http:
+    image: 'git-http-backend'
+    volumes:
+    - 'git-http-data:/git'
+
+  # Unit under test.
+  git-patrol:
+    image: 'git-patrol'
+    environment:
+    - 'DB_HOST=postgres'
+    - 'DB_PORT=5432'
+    - 'DB_USER=postgres'
+    - 'DB_NAME=postgres'
+    - 'DB_PASSWORD=postgres'
+    volumes:
+    - './testdata:/cloud-build-config.d'
+    networks:
+    - 'default'
+    - 'cloudbuild_ext'
+    command:
+    - '--poll_interval=10'
+
+  # Controls test execution.
+  test-runner:
+    image: 'git-patrol'
+    volumes:
+    - 'git-http-data:/git'
+    - '/workspace:/workspace'
+    environment:
+    - 'DB_HOST=postgres'
+    - 'DB_PORT=5432'
+    - 'DB_USER=postgres'
+    - 'DB_NAME=postgres'
+    - 'DB_PASSWORD=postgres'
+    - 'GIT_HTTP_DIR=/git'
+    - 'PYTHONPATH=/workspace'
+    entrypoint:
+    - '/usr/bin/python3'
+    - '-m'
+    - 'unittest'
+    - 'git_patrol_integration_test'
+
+# Scratch volume for shared git repositories.
+volumes:
+  git-http-data:
+
+# This network is required when accessing Google Cloud resources from within a
+# Docker container. (Ex: "gcloud builds submit").
+networks:
+  cloudbuild_ext:
+    external:
+      name: 'cloudbuild'
