@@ -13,22 +13,6 @@
 -- limitations under the License.
 
 BEGIN;
-  CREATE TABLE tag_history (
-    -- Primary key. Uniquely identifies the repository poll attempt. Can be
-    -- used by other tables to identify the specific poll attempt that
-    -- triggered subsequent actions.
-    tag_history_uuid uuid,
-    -- Time that the tag_history entry was generated. Always in UTC.
-    update_time timestamp,
-    -- URL for the git repository.
-    url text,
-    -- Human consumable alias for the repository. There must be a 1:1
-    -- correspondence between "url" and "alias".
-    alias text,
-    -- Git tags that were present when the tag_history entry was generated.
-    tags text[],
-    PRIMARY KEY(tag_history_uuid));
-
   CREATE TABLE git_poll_journal (
     -- Primary key. Uniquely identifies the repository poll attempt. Can be
     -- used by other tables to identify the specific poll attempt that
@@ -41,6 +25,15 @@ BEGIN;
     -- Human consumable alias for the repository. There must be a 1:1
     -- correspondence between "url" and "alias".
     alias text,
+    -- Identifies the most recent poll attempt for the repository identified by
+    -- "alias" that returned a new set of git refs. Otherwise NULL if this poll
+    -- attempt returned git refs seen in the previous attempt. This field can
+    -- be used to quickly identify the poll attempt that discovered new git
+    -- refs and thus triggered Cloud Build workflows.
+    -- Note: This field will be NULL if this poll attempt returned fewer git
+    -- refs than the previous attempt, as long as they are all present in that
+    -- previous attempt.
+    previous_uuid uuid,
     -- Git refs and their hashes that were present when the journal entry was
     -- generated. This will include the following items...
     --   - HEADs (branch names)

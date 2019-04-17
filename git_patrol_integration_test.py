@@ -126,7 +126,7 @@ class GitPatrolIntegrationTest(unittest.TestCase):
     self.assertEqual(returncode, 0)
 
     for i in range(3):
-      refs = loop.run_until_complete(
+      uuid, refs = loop.run_until_complete(
           self._db.fetch_latest_refs_by_alias('test'))
       if 'refs/tags/abc' in refs and 'refs/heads/master' in refs:
         break

@@ -157,6 +157,7 @@ class GitPatrolTest(unittest.TestCase):
     return {refname: commit for (commit, refname) in refs}
 
   def setUp(self):
+    super(GitPatrolTest, self).setUp()
     logging.disable(logging.CRITICAL)
 
     self._temp_dir = tempfile.mkdtemp()
@@ -167,6 +168,7 @@ class GitPatrolTest(unittest.TestCase):
 
   def tearDown(self):
     shutil.rmtree(self._temp_dir, ignore_errors=True)
+    super(GitPatrolTest, self).tearDown()
 
   def testFetchGitRefsSuccess(self):
     commands = git_patrol.GitPatrolCommands()
@@ -186,34 +188,37 @@ class GitPatrolTest(unittest.TestCase):
         git_patrol.fetch_git_refs(commands, upstream_url, ref_filters))
     self.assertDictEqual(
         refs,
-        { k: v for k, v in self._refs.items() if k.startswith('refs/tags/') })
+        {k: v for k, v in self._refs.items() if k.startswith('refs/tags/')})
 
   def testWorkflowNotTriggered(self):
     commands = git_patrol.GitPatrolCommands()
 
-    git_poll_uuid = uuid.uuid4()
-    mock_record_git_poll = AsyncioMock(return_value=git_poll_uuid)
+    previous_uuid = uuid.uuid4()
+    current_uuid = uuid.uuid4()
+    mock_record_git_poll = AsyncioMock(return_value=current_uuid)
     mock_db = MockGitPatrolDb(record_git_poll=mock_record_git_poll)
 
     loop = asyncio.get_event_loop()
 
     upstream_url = 'file://' + self._upstream_dir
     ref_filters = []
-    current_refs, new_refs = loop.run_until_complete(
+    current_uuid, current_refs, new_refs = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
             commands, mock_db, 'upstream', upstream_url, ref_filters,
-            self._refs))
+            previous_uuid, self._refs))
 
+    # Ensure previous UUID is None since there is no change in the repository's
+    # git refs.
     mock_record_git_poll.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY,
-        unittest.mock.ANY)
+        unittest.mock.ANY, upstream_url, 'upstream', None, self._refs,
+        ref_filters)
 
     # The git commit hashes are always unique across test runs, thus the
     # acrobatics here to extract the HEAD and tag names only.
     record_git_poll_args, _ = mock_record_git_poll.inner_mock.call_args
-    self.assertListEqual(
+    self.assertCountEqual(
         ['refs/heads/master', 'refs/tags/r0001', 'refs/tags/r0002'],
-        sorted(list(record_git_poll_args[3].keys())))
+        list(record_git_poll_args[4].keys()))
 
     self.assertEqual(current_refs, self._refs)
     self.assertFalse(new_refs)
@@ -221,30 +226,30 @@ class GitPatrolTest(unittest.TestCase):
   def testWorkflowIsTriggered(self):
     commands = git_patrol.GitPatrolCommands()
 
-    tag_history_uuid = uuid.uuid4()
-    git_poll_uuid = uuid.uuid4()
-    mock_record_git_poll = AsyncioMock(return_value=git_poll_uuid)
+    previous_uuid = uuid.uuid4()
+    current_uuid = uuid.uuid4()
+    mock_record_git_poll = AsyncioMock(return_value=current_uuid)
     mock_db = MockGitPatrolDb(record_git_poll=mock_record_git_poll)
 
     loop = asyncio.get_event_loop()
 
     upstream_url = 'file://' + self._upstream_dir
     ref_filters = []
-    current_refs, new_refs = loop.run_until_complete(
+    current_uuid, current_refs, new_refs = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
             commands, mock_db, 'upstream', upstream_url, ref_filters,
-            { 'refs/heads/master': 'none' }))
+            previous_uuid, {'refs/heads/master': 'none'}))
 
     mock_record_git_poll.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', unittest.mock.ANY,
-        unittest.mock.ANY)
+        unittest.mock.ANY, upstream_url, 'upstream', previous_uuid,
+        self._refs, ref_filters)
 
     # The git commit hashes are always unique across test runs, thus the
     # acrobatics here to extract the HEADs and tag names only.
     record_git_poll_args, _ = mock_record_git_poll.inner_mock.call_args
-    self.assertListEqual(
+    self.assertCountEqual(
         ['refs/heads/master', 'refs/tags/r0001', 'refs/tags/r0002'],
-        sorted(list(record_git_poll_args[3].keys())))
+        list(record_git_poll_args[4].keys()))
 
     self.assertDictEqual(current_refs, self._refs)
     self.assertDictEqual(new_refs, self._refs)

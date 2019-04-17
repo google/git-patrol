@@ -287,7 +287,7 @@ def git_refs_find_deltas(previous_refs, current_refs):
 
 
 async def run_workflow_triggers(
-    commands, db, alias, url, ref_filters, previous_refs):
+    commands, db, alias, url, ref_filters, previous_uuid, previous_refs):
   """Evaluates workflow trigger conditions.
 
   Poll the remote repository for a list of its git refs. The workflow trigger
@@ -301,6 +301,7 @@ async def run_workflow_triggers(
     url: URL of the repository to patrol.
     ref_filters: A (possibly empty) list of ref filters to pass to the
       'git ls-remote' command to filter the returned refs.
+    previous_uuid: UUID of previous git poll attempt.
     previous_refs: List of git refs to expect in the cloned repository. Any refs
       that are now in the repository and not in this list, or any altered refs
       will satisfy the workflow trigger.
@@ -312,24 +313,28 @@ async def run_workflow_triggers(
   # Retrieve current refs from the remote repo.
   current_refs = await fetch_git_refs(commands, url, ref_filters)
   if not current_refs:
-    return previous_refs, {}
+    return previous_uuid, previous_refs, {}
+
+  # See if the repository was updated since the last check. Only record the
+  # previous poll attempt's UUID if there was a change.
+  new_refs = git_refs_find_deltas(previous_refs, current_refs)
+  if new_refs:
+    logger.info('%s: new refs: %s', alias, new_refs)
+    previous_uuid_to_record = previous_uuid
+  else:
+    logger.info('%s: no new refs', alias)
+    previous_uuid_to_record = None
 
   # Add a new journal entry with these git refs.
   update_time = datetime.datetime.utcnow()
-  git_refs_uuid = await db.record_git_poll(
-      update_time, url, alias, current_refs, ref_filters)
-  if not git_refs_uuid:
+  current_uuid = await db.record_git_poll(
+      update_time, url, alias, previous_uuid_to_record, current_refs,
+      ref_filters)
+  if not current_uuid:
     logger.warning('%s: failed to record git refs', alias)
-    return previous_refs, {}
+    return previous_uuid, previous_refs, {}
 
-  # See if the repository was updated since the last check.
-  new_refs = git_refs_find_deltas(previous_refs, current_refs)
-  if not new_refs:
-    logger.info('%s: no new refs', alias)
-    return previous_refs, {}
-
-  logger.info('%s: new refs: %s', alias, new_refs)
-  return current_refs, new_refs
+  return current_uuid, current_refs, new_refs
 
 
 async def run_workflow_body(
@@ -389,7 +394,7 @@ async def target_loop(
     return
 
   # Fetch latest git tags from the database.
-  current_refs = await db.fetch_latest_refs_by_alias(alias)
+  current_uuid, current_refs = await db.fetch_latest_refs_by_alias(alias)
   logger.info('%s: current refs %s', alias, current_refs)
 
   # Stagger the wakeup time of the target loops to avoid hammering the remote
@@ -407,10 +412,11 @@ async def target_loop(
     await asyncio.sleep(sleep_time)
 
     # Evaluate workflow triggers to see if the workflow needs to run again.
-    current_refs, new_refs = await run_workflow_triggers(
-        commands, db, alias, url, ref_filters, current_refs)
+    current_uuid, current_refs, new_refs = await run_workflow_triggers(
+        commands, db, alias, url, ref_filters, current_uuid, current_refs)
 
+    # Launch a workflow for each new/updated git ref.
     workflow_tasks = [
         run_workflow_body(commands, config_path, target_config, ref)
-        for ref in new_refs.keys() ]
+        for ref in new_refs.keys()]
     await asyncio.gather(*workflow_tasks)

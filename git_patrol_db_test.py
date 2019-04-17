@@ -16,7 +16,8 @@
 
 import asyncio
 import unittest
-from unittest.mock import MagicMock
+from unittest import mock
+import uuid
 
 import git_patrol_db
 
@@ -30,7 +31,7 @@ def AsyncioMock(*args, **kwargs):
   Returns:
     An async function which passes the call onto the inner mock function.
   """
-  inner_mock = MagicMock(*args, **kwargs)
+  inner_mock = mock.MagicMock(*args, **kwargs)
 
   async def _CallMockObject(*args, **kwargs):
     return inner_mock(*args, **kwargs)
@@ -67,24 +68,26 @@ class MockAsyncpgPool:
 
   def __init__(self, connection=None):
     self._connection = connection
-    self.acquire = MagicMock(return_value=self._connection)
+    self.acquire = mock.MagicMock(return_value=self._connection)
 
 
 class GitPatrolDbTest(unittest.TestCase):
 
-  def testFetchGitTagsSuccess(self):
-    mock_fetchrow = AsyncioMock(
-        return_value={
-            'refs': [['refs/tags/r0000', 'abcd'], ['refs/tags/r0001', 'fghi']]
-        })
+  def testFetchGitRefsSuccess(self):
+    expected_uuid = uuid.uuid4()
+    expected_refs = [['refs/tags/r0000', 'abcd'], ['refs/tags/r0001', 'fghi']]
+
+    mock_fetchrow = AsyncioMock(return_value=(
+        {'git_poll_uuid': expected_uuid, 'refs': expected_refs}))
+
     mock_connection = MockAsyncpgConnection(fetchrow=mock_fetchrow)
     mock_pool = MockAsyncpgPool(connection=mock_connection)
 
     db = git_patrol_db.GitPatrolDb(mock_pool)
-    refs = asyncio.get_event_loop().run_until_complete(
+    actual_uuid, actual_refs = asyncio.get_event_loop().run_until_complete(
         db.fetch_latest_refs_by_alias('sdm845'))
-    self.assertEqual(
-        refs, {'refs/tags/r0000': 'abcd', 'refs/tags/r0001': 'fghi'})
+    self.assertEqual(actual_uuid, expected_uuid)
+    self.assertEqual(actual_refs, {ref[0]: ref[1] for ref in expected_refs})
 
     mock_fetchrow.inner_mock.assert_called_with(unittest.mock.ANY, 'sdm845')
 
@@ -93,20 +96,21 @@ class GitPatrolDbTest(unittest.TestCase):
     mock_connection = MockAsyncpgConnection(execute=mock_execute)
     mock_pool = MockAsyncpgPool(connection=mock_connection)
 
+    prev_uuid = uuid.uuid4()
     refs = {
         'refs/heads/master': 'abcde', 'refs/tags/r0001': 'abcde',
-        'refs/tags/r0002': 'defgh' }
+        'refs/tags/r0002': 'defgh'}
     ref_filters = []
 
     db = git_patrol_db.GitPatrolDb(mock_pool)
     poll_journal_uuid = asyncio.get_event_loop().run_until_complete(
-        db.record_git_poll(None, None, None, refs, ref_filters))
+        db.record_git_poll(None, None, None, prev_uuid, refs, ref_filters))
     self.assertTrue(poll_journal_uuid)
 
     mock_execute.inner_mock.assert_called_with(
         unittest.mock.ANY, poll_journal_uuid, unittest.mock.ANY,
-        unittest.mock.ANY, unittest.mock.ANY, unittest.mock.ANY,
-        unittest.mock.ANY)
+        unittest.mock.ANY, unittest.mock.ANY, prev_uuid,
+        [[item[0], item[1]] for item in refs.items()], ref_filters)
 
 
 if __name__ == '__main__':
