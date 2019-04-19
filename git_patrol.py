@@ -21,13 +21,11 @@ workflows.
 import asyncio
 import datetime
 import logging
+import json
 import os
 import re
 import uuid
 
-
-# Extract just the git tag from the output of 'git ls-remote --refs --tags'.
-GIT_TAG_REGEX = r'refs/tags/(r[a-z0-9_\.]+)'
 
 # Extract the commit hash and the reference name from the output of
 # 'git ls-remote --refs'. The exact regex for a reference name is tricky as seen
@@ -167,8 +165,10 @@ async def cloud_build_start(commands, config_path, config, git_ref):
     git_ref: The git ref (ex: refs/heads/master, refs/tags/v0.0.1) that
       triggered this workflow execution.
   Returns:
-    The UUID of the newly created Cloud Build workflow if successful. Otherwise
-    returns None.
+    The in-progress Cloud Build workflow state as a JSON string if successful.
+    See Cloud Build documentation for the schema at...
+    https://cloud.google.com/cloud-build/docs/api/reference/rest/v1/operations#Operation
+    Otherwise returns None.
   """
   arg_config = '--config={}'.format(os.path.join(config_path, config['config']))
 
@@ -221,7 +221,16 @@ async def cloud_build_start(commands, config_path, config, git_ref):
   cloud_build_uuid = build_id_list[0]
   logger.info('Cloud Build started [ID=%s]', cloud_build_uuid)
 
-  return uuid.UUID(hex=cloud_build_uuid)
+  gcb_describe_subproc = await commands.gcloud(
+      'builds', 'describe', '--format=json', str(cloud_build_uuid))
+  stdout_bytes, stderr_bytes = await gcb_describe_subproc.communicate()
+  returncode = await gcb_describe_subproc.wait()
+  if returncode:
+    log_command_error(
+        'gcloud builds describe', returncode, stdout_bytes, stderr_bytes)
+    return None
+
+  return stdout_bytes.decode('utf-8', 'ignore')
 
 
 async def cloud_build_wait(commands, cloud_build_uuid):
@@ -242,20 +251,22 @@ async def cloud_build_wait(commands, cloud_build_uuid):
   gcb_log_subproc = await commands.gcloud(
       'builds', 'log', '--stream', '--no-user-output-enabled',
       str(cloud_build_uuid))
-  await gcb_log_subproc.communicate()
+  stdout_bytes, stderr_bytes = await gcb_log_subproc.communicate()
   returncode = await gcb_log_subproc.wait()
   if returncode:
-    logger.warning('gcloud builds log returned %d', returncode)
+    log_command_error(
+        'gcloud builds log', returncode, stdout_bytes, stderr_bytes)
     return None
 
   logger.info('Cloud Build finished [ID=%s]', cloud_build_uuid)
 
   gcb_describe_subproc = await commands.gcloud(
       'builds', 'describe', '--format=json', str(cloud_build_uuid))
-  stdout_bytes, _ = await gcb_describe_subproc.communicate()
+  stdout_bytes, stderr_bytes = await gcb_describe_subproc.communicate()
   returncode = await gcb_describe_subproc.wait()
   if returncode:
-    logger.warning('gcloud builds describe returned %d', returncode)
+    log_command_error(
+        'gcloud builds describe', returncode, stdout_bytes, stderr_bytes)
     return None
 
   return stdout_bytes.decode('utf-8', 'ignore')
@@ -287,7 +298,8 @@ def git_refs_find_deltas(previous_refs, current_refs):
 
 
 async def run_workflow_triggers(
-    commands, db, alias, url, ref_filters, previous_uuid, previous_refs):
+    commands, db, alias, url, ref_filters, utc_datetime, previous_uuid,
+    previous_refs):
   """Evaluates workflow trigger conditions.
 
   Poll the remote repository for a list of its git refs. The workflow trigger
@@ -301,15 +313,17 @@ async def run_workflow_triggers(
     url: URL of the repository to patrol.
     ref_filters: A (possibly empty) list of ref filters to pass to the
       'git ls-remote' command to filter the returned refs.
+    utc_datetime: Timestamp of the poll operation in UTC time zone.
     previous_uuid: UUID of previous git poll attempt.
     previous_refs: List of git refs to expect in the cloned repository. Any refs
       that are now in the repository and not in this list, or any altered refs
       will satisfy the workflow trigger.
   Returns:
-    Returns a (dict, dict) tuple. The first item contains a dictionary of the
-    current git tags in the remote repository. The second item contains a
-    dictionary of git refs that should trigger a workflow execution.
-  """
+    Returns a (uuid, dict, dict) tuple. The first item is the persistent UUID
+    for the poll attempt. The second item contains a dictionary of the current
+    git refs in the remote repository. The third item contains a dictionary of
+    git refs that should trigger a workflow execution.
+    """
   # Retrieve current refs from the remote repo.
   current_refs = await fetch_git_refs(commands, url, ref_filters)
   if not current_refs:
@@ -326,9 +340,8 @@ async def run_workflow_triggers(
     previous_uuid_to_record = None
 
   # Add a new journal entry with these git refs.
-  update_time = datetime.datetime.utcnow()
   current_uuid = await db.record_git_poll(
-      update_time, url, alias, previous_uuid_to_record, current_refs,
+      utc_datetime, url, alias, previous_uuid_to_record, current_refs,
       ref_filters)
   if not current_uuid:
     logger.warning('%s: failed to record git refs', alias)
@@ -338,25 +351,66 @@ async def run_workflow_triggers(
 
 
 async def run_workflow_body(
-    commands, config_path, config, git_ref):
+    commands, db, config_path, config, git_poll_uuid, git_ref):
   """Runs the actual workflow logic.
 
   Args:
     commands: GitPatrolCommands object used to execute external commands.
+    db: A GitPatrolDb object used for database operations.
     config_path: Path to the Cloud Build configuration sources.
     config: Target configuration object.
-    git_ref: The git ref (ex: refs/heads/master, refs/tags/v0.0.1) that
-      triggered this workflow execution.
+    git_ref: The git ref dictionary item (ex: ('refs/heads/master', '<hash>'))
+      that triggered this workflow execution.
   Returns:
     True when the workflow completes successfully. False otherwise.
   """
+  alias = config['alias']
+
+  parent_id = 0
   for workflow in config['workflows']:
-    build_id = await cloud_build_start(commands, config_path, workflow, git_ref)
-    if not build_id:
+    utc_datetime = datetime.datetime.utcnow()
+    status_json = await cloud_build_start(
+        commands, config_path, workflow, git_ref[0])
+    if not status_json:
       return False
+
+    try:
+      status = json.loads(status_json)
+    except JSONDecodeError as e:
+      logger.error('Failed to decode Cloud Build JSON: %s', e)
+      return False
+
+    if not 'id' in status:
+      return False
+    build_id = status['id']
+
+    journal_id = await db.record_cloud_build(
+        parent_id, git_poll_uuid, utc_datetime, alias, git_ref, status)
+    if not journal_id:
+      return False
+    parent_id = journal_id
 
     status_json = await cloud_build_wait(commands, build_id)
     if not status_json:
+      return False
+
+    utc_datetime = datetime.datetime.utcnow()
+    try:
+      status = json.loads(status_json)
+    except JSONDecodeError as e:
+      logger.error('Failed to decode Cloud Build JSON: %s', e)
+      return False
+
+    journal_id = await db.record_cloud_build(
+        parent_id, git_poll_uuid, utc_datetime, alias, git_ref, status)
+    if not journal_id:
+      return False
+    parent_id = journal_id
+
+    if not 'status' in status:
+      return False
+
+    if status['status'] != 'SUCCESS':
       return False
 
   return True
@@ -411,12 +465,17 @@ async def target_loop(
     logger.info('%s: sleeping for %f', alias, sleep_time)
     await asyncio.sleep(sleep_time)
 
+    # Get the current time for this round.
+    utc_datetime = datetime.datetime.utcnow()
+
     # Evaluate workflow triggers to see if the workflow needs to run again.
     current_uuid, current_refs, new_refs = await run_workflow_triggers(
-        commands, db, alias, url, ref_filters, current_uuid, current_refs)
+        commands, db, alias, url, ref_filters, utc_datetime, current_uuid,
+        current_refs)
 
     # Launch a workflow for each new/updated git ref.
     workflow_tasks = [
-        run_workflow_body(commands, config_path, target_config, ref)
-        for ref in new_refs.keys()]
+        run_workflow_body(
+            commands, db, config_path, target_config, current_uuid, ref)
+        for ref in new_refs.items()]
     await asyncio.gather(*workflow_tasks)

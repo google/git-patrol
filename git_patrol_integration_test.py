@@ -28,6 +28,8 @@ import git_patrol_db
 
 DB_CONNECT_ATTEMPTS = 3
 DB_CONNECT_WAIT_SECS = 10
+FETCH_REFS_ATTEMPTS = 3
+FETCH_REFS_WAIT_SECS = 20
 
 
 class GitPatrolIntegrationTest(unittest.TestCase):
@@ -125,14 +127,15 @@ class GitPatrolIntegrationTest(unittest.TestCase):
             'git', 'push', '--quiet', '--mirror', cwd=self._clone_dir))
     self.assertEqual(returncode, 0)
 
-    for i in range(3):
+    # Wait for Git Patrol to poll the new commits and record them.
+    for i in range(FETCH_REFS_ATTEMPTS):
       uuid, refs = loop.run_until_complete(
           self._db.fetch_latest_refs_by_alias('test'))
       if 'refs/tags/abc' in refs and 'refs/heads/master' in refs:
         break
 
       logging.warning('Expected refs not found yet...')
-      time.sleep(20)
+      time.sleep(FETCH_REFS_WAIT_SECS)
 
     self.assertTrue('refs/tags/abc' in refs)
     self.assertTrue('refs/heads/master' in refs)

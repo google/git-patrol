@@ -15,7 +15,9 @@
 """Tests for git_patrol."""
 
 import asyncio
+import datetime
 import logging
+import json
 import os
 import re
 import shutil
@@ -28,22 +30,28 @@ import git_patrol
 import yaml
 
 
-class _MockProcess():
+class _FakeProcess():
+  """Fake version of asyncio.subprocess.Process class.
+
+  Provides a fake implementation of the parts of the asyncio.subprocess.Process
+  class used by Git Patrol. The wait() and communicate() class methods are
+  `async def` defined so we can't just swap in a MagicMock class.
+  """
 
   def __init__(self, returncode, stdout, stderr):
-    self.returncode = returncode
-    self.stdout = stdout
-    self.stderr = stderr
+    self._returncode = returncode
+    self._stdout = stdout
+    self._stderr = stderr
 
   async def wait(self):
-    return self.returncode
+    return self._returncode
 
   async def communicate(self):
-    return self.stdout, self.stderr
+    return self._stdout, self._stderr
 
 
-def _MakeMockCommand(returncode_fn=None, stdout_fn=None, stderr_fn=None):
-  """Construct a coroutine to return a MockProcess.
+def _MakeFakeCommand(returncode_fn=None, stdout_fn=None, stderr_fn=None):
+  """Construct a coroutine to return a FakeProcess.
 
   Parameters are provided as lookup functions that are called with the args
   provided to the subprocess' command line. This allows mock commands to behave
@@ -61,23 +69,48 @@ def _MakeMockCommand(returncode_fn=None, stdout_fn=None, stderr_fn=None):
       the subprocess args. If not provided, stderr defaults to an empty byte
       array.
   Returns:
-    A coroutine that creates a MockProcess instance.
+    A coroutine that creates a FakeProcess instance.
   """
-  async def _GetMockProcess(*args):
-    returncode = 0
-    stdout = ''.encode()
-    stderr = ''.encode()
 
-    if args:
+  class FakeCommand:
+    """Stateful fake command execution.
+
+    Keeps track of the number of times a specific command (with arguments) has
+    been run to permit responsive fake behavior. Useful for generating
+    different exit code/stdout/stderr based on command arguments and the number
+    of times a command has been run.
+    TODO(brian): Perhaps replace this design with layered AsyncioMock objects.
+    """
+
+    def __init__(self, returncode_fn, stdout_fn, stderr_fn):
+      self._call_counts = {}
+      self._returncode_fn = returncode_fn
+      self._stdout_fn = stdout_fn
+      self._stderr_fn = stderr_fn
+
+    def __call__(self, *args):
+      call_str = ' '.join(['{!r}'.format(arg) for arg in args])
+      call_count = self._call_counts.get(call_str, 0)
+      self._call_counts[call_str] = call_count + 1
+
+      returncode = 0
+      stdout = ''.encode()
+      stderr = ''.encode()
+
       if returncode_fn:
-        returncode = returncode_fn(*args)
+        returncode = returncode_fn(*args, count=call_count)
       if stdout_fn:
-        stdout = stdout_fn(*args)
+        stdout = stdout_fn(*args, count=call_count)
       if stderr_fn:
-        stderr = stderr_fn(*args)
+        stderr = stderr_fn(*args, count=call_count)
 
-    return _MockProcess(returncode, stdout, stderr)
-  return _GetMockProcess
+      return _FakeProcess(returncode, stdout, stderr)
+
+  fake_command = FakeCommand(returncode_fn, stdout_fn, stderr_fn)
+  async def _GetFakeProcess(*args):
+    return fake_command(*args)
+
+  return _GetFakeProcess
 
 
 def AsyncioMock(*args, **kwargs):
@@ -101,8 +134,9 @@ def AsyncioMock(*args, **kwargs):
 
 class MockGitPatrolDb():
 
-  def __init__(self, record_git_poll=None):
+  def __init__(self, record_git_poll=None, record_cloud_build=None):
     self.record_git_poll = record_git_poll
+    self.record_cloud_build = record_cloud_build
 
 
 class GitPatrolTest(unittest.TestCase):
@@ -202,16 +236,16 @@ class GitPatrolTest(unittest.TestCase):
 
     upstream_url = 'file://' + self._upstream_dir
     ref_filters = []
+    utc_datetime = datetime.datetime.utcnow()
     current_uuid, current_refs, new_refs = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
             commands, mock_db, 'upstream', upstream_url, ref_filters,
-            previous_uuid, self._refs))
+            utc_datetime, previous_uuid, self._refs))
 
     # Ensure previous UUID is None since there is no change in the repository's
     # git refs.
     mock_record_git_poll.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', None, self._refs,
-        ref_filters)
+        utc_datetime, upstream_url, 'upstream', None, self._refs, ref_filters)
 
     # The git commit hashes are always unique across test runs, thus the
     # acrobatics here to extract the HEAD and tag names only.
@@ -235,13 +269,14 @@ class GitPatrolTest(unittest.TestCase):
 
     upstream_url = 'file://' + self._upstream_dir
     ref_filters = []
+    utc_datetime = datetime.datetime.utcnow()
     current_uuid, current_refs, new_refs = loop.run_until_complete(
         git_patrol.run_workflow_triggers(
             commands, mock_db, 'upstream', upstream_url, ref_filters,
-            previous_uuid, {'refs/heads/master': 'none'}))
+            utc_datetime, previous_uuid, {'refs/heads/master': 'none'}))
 
     mock_record_git_poll.inner_mock.assert_called_with(
-        unittest.mock.ANY, upstream_url, 'upstream', previous_uuid,
+        utc_datetime, upstream_url, 'upstream', previous_uuid,
         self._refs, ref_filters)
 
     # The git commit hashes are always unique across test runs, thus the
@@ -254,12 +289,23 @@ class GitPatrolTest(unittest.TestCase):
     self.assertDictEqual(current_refs, self._refs)
     self.assertDictEqual(new_refs, self._refs)
 
-  def testRunWorkflowSuccess(self):
+  def testRunOneWorkflowSuccess(self):
     cloud_build_uuid = '7d1bb5a7-545f-4c30-b640-f5461036e2e7'
+
+    cloud_build_json = [
+        ('{ "createTime": "2018-11-01T20:49:31.802340417Z", '
+         '"id": "7d1bb5a7-545f-4c30-b640-f5461036e2e7", '
+         '"startTime": "2018-11-01T20:50:24.132599935Z", '
+         '"status": "QUEUED" }').encode(),
+        ('{ "createTime": "2018-11-01T20:49:31.802340417Z", '
+         '"finishTime": "2018-11-01T22:44:36.303015Z", '
+         '"id": "7d1bb5a7-545f-4c30-b640-f5461036e2e7", '
+         '"startTime": "2018-11-01T20:50:24.132599935Z", '
+         '"status": "SUCCESS" }').encode()]
 
     # Queue up three different stdout strings for the gcloud mock to return,
     # one for each of the different commands we expect the client to call.
-    def gcloud_builds_stdout(*args):
+    def gcloud_builds_stdout(*args, count):
       if args[1] == 'submit':
         return (
             '7d1bb5a7-545f-4c30-b640-f5461036e2e7 '
@@ -271,18 +317,19 @@ class GitPatrolTest(unittest.TestCase):
       if args[1] == 'log':
         return ''.encode()
       if args[1] == 'describe':
-        return (
-            '{ "createTime": "2018-11-01T20:49:31.802340417Z", '
-            '"finishTime": "2018-11-01T22:44:36.303015Z", '
-            '"id": "7d1bb5a7-545f-4c30-b640-f5461036e2e7", '
-            '"startTime": "2018-11-01T20:50:24.132599935Z", '
-            '"status": "SUCCESS" }').encode()
+        return cloud_build_json[count]
       raise ValueError('Unexpected gcloud command: {}'.format(args[1]))
 
     commands = git_patrol.GitPatrolCommands()
     commands.gcloud = unittest.mock.MagicMock()
-    commands.gcloud.side_effect = _MakeMockCommand(
+    commands.gcloud.side_effect = _MakeFakeCommand(
         stdout_fn=gcloud_builds_stdout)
+
+    # The "record_cloud_build()" method returns the journal_id of the created
+    # entry. This must be the value of parent_id for the next entry.
+    journal_ids = [1, 2]
+    mock_record_cloud_build = AsyncioMock(side_effect=journal_ids)
+    mock_db = MockGitPatrolDb(record_cloud_build=mock_record_cloud_build)
 
     target_config = yaml.safe_load(
         """
@@ -301,18 +348,20 @@ class GitPatrolTest(unittest.TestCase):
         ','.join('{!s}={!s}'.format(k, v) for (k, v) in substitutions.items()))
 
     config_path = '/some/path'
-    git_ref = 'refs/tags/r0002'
+    git_poll_uuid = uuid.uuid4()
+    git_ref = ('refs/tags/r0002', 'deadbeef')
 
     workflow_success = asyncio.get_event_loop().run_until_complete(
         git_patrol.run_workflow_body(
-            commands, config_path, target_config, git_ref))
+            commands, mock_db, config_path, target_config, git_poll_uuid,
+            git_ref))
     self.assertTrue(workflow_success)
 
     commands.gcloud.assert_any_call(
         'builds', 'submit', '--async',
         '--config={}'.format(os.path.join(config_path, workflow['config'])),
         '--substitutions=TAG_NAME={},{}'.format(
-            git_ref.replace('refs/tags/', ''), substitution_list),
+            git_ref[0].replace('refs/tags/', ''), substitution_list),
         os.path.join(config_path, workflow['sources']))
 
     commands.gcloud.assert_any_call(
@@ -322,6 +371,28 @@ class GitPatrolTest(unittest.TestCase):
     commands.gcloud.assert_any_call(
         'builds', 'describe', '--format=json', cloud_build_uuid)
 
+    # We know the method will be called with only positional arguments so we
+    # can unpack call_args_list to discard the unused kwargs.
+    record_cloud_build_args = [
+        args for (args, _) in mock_record_cloud_build.inner_mock.call_args_list]
+
+    # There should be two calls to "record_cloud_build()".
+    self.assertEqual(len(record_cloud_build_args), 2)
+
+    # The first call should have parent_id set to "0", indicating this is the
+    # first entry. The second call should have parent_id set to "1", indicating
+    # this entry has a parent.
+    self.assertEqual(record_cloud_build_args[0][0], 0)
+    self.assertEqual(record_cloud_build_args[1][0], 1)
+
+    # The recorded Cloud Build JSON status should reflect what we passed via the
+    # fake gcloud commands.
+    self.assertEqual(
+        record_cloud_build_args[0][5].items(),
+        json.loads(cloud_build_json[0].decode('utf-8', 'ignore')).items())
+    self.assertEqual(
+        record_cloud_build_args[1][5].items(),
+        json.loads(cloud_build_json[1].decode('utf-8', 'ignore')).items())
 
 if __name__ == '__main__':
   unittest.main()

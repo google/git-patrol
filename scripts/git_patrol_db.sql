@@ -60,4 +60,39 @@ BEGIN;
     -- command must be used to validate all entries.
     ref_filters text[],
     PRIMARY KEY(git_poll_uuid));
+
+  CREATE TABLE cloud_build_journal (
+    -- Primary key. Uniquely identifies the journal update. Per the PostgreSQL
+    -- documentation this corresponds to an "integer" column.
+    -- https://www.postgresql.org/docs/9.5/datatype-numeric.html#DATATYPE-SERIAL
+    journal_id serial,
+
+    -- Identifies the preceding journal entry. This column is zero when this is
+    -- the first journal entry for a workflow execution. This column is intended
+    -- to be used in a recursive query to trace the status of all workflows that
+    -- were executed in response to a particular git poll.
+    -- Note: Since this is an append-only table the parent_id can refer to an
+    -- instance of the same Cloud Build workflow.
+    parent_id integer,
+
+    -- Identifies the git poll that triggered this execution.
+    git_poll_uuid uuid references git_poll_journal(git_poll_uuid),
+
+    -- Time that the journal entry was generated. Always in UTC.
+    update_time timestamp,
+
+    -- Human consumable alias for the repository. Must match the "alias" field
+    -- in the corresponding git_poll_journal entry.
+    alias text,
+
+    -- The git ref label and commit hash assigned to this sequence of Cloud
+    -- Build workflows. A git poll can yield multiple new or updated git refs
+    -- so this field tracks the specific git ref assigned to the workflows.
+    ref text[2],
+
+    -- Dump of the JSON status returned by "gcloud builds describe" command. If
+    -- the parent_id field is non-zero then this entry *must* have a different
+    -- status field than the previous entry.
+    cloud_build_status jsonb,
+    PRIMARY KEY(journal_id));
 END;

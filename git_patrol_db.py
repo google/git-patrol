@@ -17,6 +17,7 @@
 Provides a high level API to the database of persistent state.
 """
 
+import json
 import uuid
 
 
@@ -36,7 +37,7 @@ class GitPatrolDb:
     """Retrieve the most recent git refs for a given alias.
 
     Args:
-      alias: The git alias to use when looking up git tags.
+      alias: The git alias to use when looking up git refs.
     Returns:
       A (UUID, dict) tuple. The first item is the UUID of the most recent poll
       attempt for the alias. The second item is a dictionary of git refs and
@@ -86,4 +87,30 @@ class GitPatrolDb:
       if insert_status == 'INSERT 0 1':
         return poll_journal_uuid
 
-    return None
+  async def record_cloud_build(
+      self, parent_id, git_poll_uuid, utc_datetime, alias, ref,
+      cloud_build_status):
+    """Update the Cloud Build journal with the current build status.
+
+    Args:
+      parent_id: Reference to the previous update for this Cloud Build attempt.
+        Zero if this is the first update.
+      git_poll_uuid: Reference to the git poll entry that triggered this build.
+      utc_datetime: Timestamp of the poll operation in UTC time zone.
+      alias: Human readable alias for the repository.
+      ref: Git reference name and commit hash that triggered this build.
+      cloud_build_status: Cloud Build status JSON.
+    Returns:
+      The unique identifier assigned to this entry if successful. None
+      otherwise.
+    """
+    async with self.db_pool.acquire() as conn:
+      journal_id = await conn.fetchval(
+          '''INSERT INTO cloud_build_journal (
+            parent_id, git_poll_uuid, update_time, alias, ref,
+            cloud_build_status)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          RETURNING journal_id;
+          ''', parent_id, git_poll_uuid, utc_datetime, alias, ref,
+          json.dumps(cloud_build_status))
+      return journal_id

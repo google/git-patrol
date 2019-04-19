@@ -29,7 +29,10 @@ services:
     volumes:
     - 'git-http-data:/git'
 
-  # Unit under test.
+  # Unit under test. Git Patrol is set up to poll the integration test
+  # repository by the configuration in the /testdata folder. Credentials to
+  # issue "gcloud builds" commands are obtained from the cloudbuild_ext network
+  # provided by the Cloud Build runtime environment.
   git-patrol:
     image: 'git-patrol'
     environment:
@@ -46,7 +49,10 @@ services:
     command:
     - '--poll_interval=10'
 
-  # Controls test execution.
+  # Controls test execution. Mount the Cloud Build /workspace folder and
+  # update PYTHONPATH accordingly to access the integration test module.
+  # The test's git repository is shared with the HTTP server container via
+  # another volume mount.
   test-runner:
     image: 'git-patrol'
     volumes:
@@ -71,7 +77,8 @@ volumes:
   git-http-data:
 
 # This network is required when accessing Google Cloud resources from within a
-# Docker container. (Ex: "gcloud builds submit").
+# Docker container. (Ex: "gcloud builds submit"). It is provided automatically
+# by the Cloud Build runtime environment.
 networks:
   cloudbuild_ext:
     external:
